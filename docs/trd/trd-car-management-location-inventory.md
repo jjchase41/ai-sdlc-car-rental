@@ -48,12 +48,14 @@ This document defines technical requirements for the fleet onboarding and lifecy
 
 ### Database Design
 
-Use the [Location & Inventory database design](database-design-car-management-location-inventory.md) for the logical entities and relationships. Persist a vehicle's current home location on its inventory record and append a location-history record for each completed transfer. Vehicle creation and initial-location history, and each transfer and its new current location, must be committed atomically so the current inventory state cannot disagree with its history.
+Use the [Location & Inventory database design](database-design-car-management-location-inventory.md) as the canonical shared vehicle master and for the logical entities and relationships. Persist one current lifecycle status (`status`) and one current home location on the vehicle record; preserve status and location changes in their respective history records. Vehicle creation and its initial histories, and each transfer and its new current location, must be committed atomically so current inventory state cannot disagree with its history.
+
+The design covers `locations`, `vehicles`, `vehicle_status_histories`, `vehicle_location_histories`, and `transfer_costs`.
 
 ### Frontend
 
 - Provide fleet staff with searchable and filterable inventory by home location and lifecycle status. Display enough vehicle identifiers and descriptive attributes to distinguish inventory records.
-- Provide an onboarding form for the vehicle attributes listed in the PRD, with the initial home location required.
+- Provide an onboarding form for the vehicle attributes listed in the PRD, with the initial home location required. Apply attribute requiredness from the approved field-requirements matrix.
 - Provide a vehicle detail view showing its current home location, lifecycle status, captured vehicle and insurance details, and chronological location history.
 - Provide a transfer form that identifies the source and destination locations and allows an incurred transfer cost to be recorded as charged to the company pool.
 - Provide an explicit status-change action using only the lifecycle statuses in the PRD. Do not infer or automatically change a status from vehicle age, mileage, or depreciation.
@@ -71,20 +73,21 @@ Expose resource-oriented REST endpoints. The API must validate requests server-s
 | `GET /locations` | Optional pagination parameters | `200` with location identifiers and display names |
 | `POST /locations` | Required location display name; other address/location fields await product confirmation | `201` with the created location |
 | `GET /vehicles` | Optional `location_id`, `status`, `vin`, `license_plate`, and pagination query parameters | `200` with matching vehicle records and pagination metadata |
-| `POST /vehicles` | Vehicle attributes, company ownership, and required initial `home_location_id` | `201` with the created vehicle |
+| `POST /vehicles` | Vehicle attributes and required initial `home_location_id`; the service sets ownership to company and status to `incoming` | `201` with the created vehicle |
 | `GET /vehicles/{vehicle_id}` | `vehicle_id` path parameter | `200` with vehicle details and location history |
 | `PATCH /vehicles/{vehicle_id}` | `vehicle_id` path parameter; mutable vehicle descriptive, purchase, insurance, and odometer fields. Excludes ownership, lifecycle status, and home location. | `200` with the updated vehicle |
-| `POST /vehicles/{vehicle_id}/status` | `vehicle_id` path parameter; body contains the requested `status` | `200` with the updated vehicle |
+| `POST /vehicles/{vehicle_id}/status` | `vehicle_id` path parameter; body contains the requested `status` | `200` with the updated vehicle and status-change record |
 | `POST /vehicles/{vehicle_id}/transfers` | `vehicle_id` path parameter; body contains required `destination_location_id`, optional `effective_at`, and optional aggregate incurred `cost` with amount and currency | `201` with the transfer, updated vehicle location, and any cost record |
 
 Use standard HTTP status semantics: `400` for malformed or invalid input, `401` for missing or invalid authentication, `403` for an authenticated caller without permission, `404` for a missing resource, `409` for conflicting or duplicate state, and `5xx` for unexpected service failures. Error responses must provide a stable machine-readable error identifier and a safe, human-readable message; field validation errors should identify the relevant field. Do not expose internal exception details.
 
 #### Validation and consistency
 
-- Enforce required vehicle attributes as established by product/design review and the enumerated PRD domains: size is small or medium; class is economy or luxury; fuel type is gas, electric, or hybrid; ownership is company; lifecycle status is incoming, active, maintenance, decommissioning, or sold.
+- Apply field requiredness from the approved field-requirements matrix. Validate provided values against the PRD domains: size is small or medium; class is economy or luxury; fuel type is gas, electric, or hybrid; ownership is set by the service to company; status is incoming, active, maintenance, decommissioning, or sold.
 - Require a valid existing home location on vehicle creation and a valid destination location on transfer. Reject a transfer to the vehicle's current location as a no-op conflict.
-- Prevent duplicate vehicle identifiers according to confirmed identifier scope. VIN uniqueness should be enforced; license-plate uniqueness must account for the registration jurisdiction once that scope is confirmed.
+- Enforce case-insensitive VIN uniqueness among non-deleted vehicles when VIN is provided. Enforce case-insensitive license-plate uniqueness within the registration-jurisdiction scope once that scope is confirmed.
 - Reject unsupported lifecycle status values. Since the PRD does not define a transition matrix, do not reject a recognized status solely because it is a particular transition; apply authorization and any subsequently approved business rules.
+- Persist a lifecycle status change by updating the vehicle's single `status` field and appending a `vehicle_status_histories` record in the same transaction. Do not append a history record when the requested status is already current.
 - Treat omitted patch fields as unchanged. Do not allow patch operations to change the company-only ownership, lifecycle status, or home location; use the dedicated operations for status changes and transfers.
 - Validate cost amounts as non-negative decimal amounts with at most two fractional digits and a precision sufficient for the database design. Require a currency code whenever a cost is supplied. Do not calculate costs or silently select a currency.
 - Record every transfer cost with company-pool attribution. Do not accept a caller-supplied allocation target that could route this cost elsewhere.
@@ -97,8 +100,8 @@ Use standard HTTP status semantics: `400` for malformed or invalid input, `401` 
 Vehicle onboarding:
 
 1. Authenticate and authorize the caller.
-2. Validate the vehicle attributes, company ownership, unique VIN, and referenced initial location.
-3. In one transaction, create the vehicle in the requested permitted initial lifecycle status and record its initial location assignment.
+2. Validate the provided vehicle attributes, set ownership to company, check identifier uniqueness when identifiers are provided, and validate the referenced initial location.
+3. In one transaction, create the vehicle with status `incoming` and record its initial location and status history.
 4. Commit and return the vehicle; on any validation or persistence error, return an appropriate error without partial creation.
 
 Vehicle transfer:

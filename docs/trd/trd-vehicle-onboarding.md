@@ -27,7 +27,7 @@ This document defines technical requirements for the “Fleet onboarding and lif
 ## In Scope
 
 - Create and maintain vehicle records for company-owned rental vehicles.
-- Capture VIN, license plate, purchase date and cost, insurance details and expiration, odometer, brand, model, manufacturing year, size, class, seat count, fuel type, and ownership.
+- Capture VIN, license plate, purchase date and cost, insurance details and expiration, odometer, brand, model, manufacturing year, size, class, seat count, fuel type, ownership, and the vehicle's required home-location reference.
 - Support the incoming, active, maintenance, decommissioning, and sold lifecycle statuses.
 - Record lifecycle status changes with an audit history.
 - Provide vehicle record and status operations through a REST API.
@@ -38,7 +38,7 @@ This document defines technical requirements for the “Fleet onboarding and lif
 - Peer-to-peer vehicles are out of scope; ownership is company-owned.
 - Vehicle minimum-required fields are subject to confirmation after UI design. The fields listed in the PRD are the capture scope; field-level requiredness must be configurable or finalized before implementation.
 - No automatic retirement based on age, mileage, or depreciation is allowed. Retirement and disposal are initiated manually.
-- Reservation allocation, availability calculations, home-location assignment, transfers, maintenance scheduling, insurance-expiry allocation rules, and other rental operations are outside this TRD.
+- Reservation allocation, availability calculations, home-location assignment and transfers, maintenance scheduling, insurance-expiry allocation rules, and other rental operations are outside this TRD. The shared vehicle record still carries the required current home-location reference.
 - No database vendor, application framework, identity provider, or deployment platform is prescribed.
 
 ## Technical Requirements
@@ -53,7 +53,7 @@ Use the conceptual tables in [Database Design - Vehicle Onboarding](database-des
 ### Frontend
 
 - Provide a vehicle onboarding form for all vehicle attributes listed in the PRD.
-- Present size, class, fuel type, and lifecycle status as selections constrained to the supported values.
+- Present size, class, and fuel type as selections constrained to the supported values. Set the initial lifecycle status to `incoming`; provide status changes through the separate authorized status flow. Require a home location when creating a vehicle.
 - Set ownership to company-owned; do not allow the user to register a non-company-owned vehicle.
 - Validate entered values before submission and present field-specific validation errors inline. Server validation remains authoritative.
 - After successful creation, show the persisted vehicle record and its initial status. Do not imply that an incoming vehicle is active or available for rental.
@@ -67,24 +67,25 @@ All endpoints require authentication and return a consistent error response cont
 
 | Method and URL | Purpose | Request | Successful response |
 |---|---|---|---|
-| `POST /api/v1/vehicles` | Create a vehicle record. | Vehicle attributes listed below, excluding server-managed identifiers, audit fields, and ownership. | `201 Created`; the persisted vehicle record, including its identifier, ownership, and initial status. |
-| `GET /api/v1/vehicles/{vehicleId}` | Retrieve a vehicle record. | `vehicleId` path parameter. | `200 OK`; the vehicle record and current status. |
-| `PATCH /api/v1/vehicles/{vehicleId}` | Update editable vehicle details. | `vehicleId` path parameter and one or more editable vehicle attributes. | `200 OK`; the updated vehicle record. |
-| `PATCH /api/v1/vehicles/{vehicleId}/status` | Change lifecycle status. | `vehicleId` path parameter and the requested status. | `200 OK`; the updated status and status-change record. |
+| `POST /api/v1/vehicles` | Create a vehicle record. | Vehicle attributes listed below, including `home_location_id`, excluding server-managed identifiers, audit fields, and ownership. | `201 Created`; the persisted vehicle record, including its identifier, ownership, home location, and initial lifecycle status. |
+| `GET /api/v1/vehicles/{vehicleId}` | Retrieve a vehicle record. | `vehicleId` path parameter. | `200 OK`; the vehicle record, current lifecycle status, and home location. |
+| `PATCH /api/v1/vehicles/{vehicleId}` | Update editable vehicle details. | `vehicleId` path parameter and one or more editable vehicle attributes. Excludes ownership, lifecycle status, and home location. | `200 OK`; the updated vehicle record. |
+| `PATCH /api/v1/vehicles/{vehicleId}/status` | Change lifecycle status. | `vehicleId` path parameter and the requested `lifecycle_status`. | `200 OK`; the updated lifecycle status and status-change record. |
 
-Vehicle attributes are VIN, license plate, purchase date, purchase cost, insurance details, insurance expiration, odometer, brand, model, manufacturing year, size, class, seat count, and fuel type. Ownership is set by the service to company-owned. A newly created record starts as `incoming`; clients cannot create a record directly in another status. The approved field-requirements matrix, to be finalized after UI design, determines which attributes must be provided at onboarding.
+The vehicle request fields are `vin`, `license_plate`, `purchase_date`, `purchase_cost`, `insurance_details`, `insurance_expires_on`, `odometer_km`, `brand`, `model`, `manufacturing_year`, `size`, `vehicle_class`, `seat_count`, `fuel_type`, and, on creation, `home_location_id`. These correspond to the vehicle attributes in the PRD; `vehicle_class` represents its “class” attribute. Ownership is set by the service to company-owned. `lifecycle_status` is server-set to `incoming` on creation and cannot be supplied in the create request. The approved field-requirements matrix, to be finalized after UI design, determines which attributes must be provided at onboarding. A valid home location is required at creation.
 
 #### Validation and behavior
 
-- Require the supported values for size (`small`, `medium`), class (`economy`, `luxury`), fuel type (`gas`, `electric`, `hybrid`), and status (`incoming`, `active`, `maintenance`, `decommissioning`, `sold`).
-- Validate purchase date and insurance expiration as dates; validate purchase cost as a non-negative monetary amount with two decimal places; validate odometer as a non-negative value; validate manufacturing year and seat count as positive whole numbers. Apply these checks when the corresponding values are provided.
+- Require the supported values for size (`small`, `medium`), class (`economy`, `luxury`), fuel type (`gas`, `electric`, `hybrid`), and `lifecycle_status` (`incoming`, `active`, `maintenance`, `decommissioning`, `sold`). Store this current status once as `lifecycle_status`; status-history values use the same domain.
+- Validate purchase date and insurance expiration as dates; validate purchase cost as a non-negative monetary amount with two decimal places; validate odometer in kilometers as a non-negative whole-number value; validate manufacturing year and seat count as positive whole numbers. Apply these checks when the corresponding values are provided.
 - Require attributes only as specified by the approved field-requirements matrix; do not make additional attributes mandatory before that matrix is finalized. Trim surrounding whitespace before validation and persistence.
-- Prevent duplicate non-empty VIN and license plate values among non-deleted vehicle records. Treat these identifiers as case-insensitive for duplicate checking.
+- Prevent duplicate non-empty VIN values among non-deleted vehicle records, treating VINs case-insensitively. Do not impose global license-plate uniqueness until registration jurisdiction is defined; enforce uniqueness within the confirmed scope.
+- Require `home_location_id` to reference an existing, non-deleted location. The location entity is part of the shared fleet inventory design; location assignment and transfer workflows remain outside this TRD.
 - Reject unsupported fields, invalid enum values, malformed identifiers, and invalid field combinations without partially persisting the request.
 - Apply updates atomically. Do not permit clients to change ownership, vehicle identifier, audit fields, or deletion metadata through the vehicle details endpoint.
 - On a status change, persist the vehicle’s new status and a corresponding history record atomically. Do not create a history record when the requested status is already current.
 - Do not infer or automate retirement, disposal, or status changes from age, mileage, or depreciation.
-- Return `400 Bad Request` for invalid input, `401 Unauthorized` for unauthenticated requests, `403 Forbidden` for authenticated users without the required permission, and `404 Not Found` for an unknown or deleted vehicle. Return `409 Conflict` for duplicate VIN or license plate values.
+- Return `400 Bad Request` for invalid input, `401 Unauthorized` for unauthenticated requests, `403 Forbidden` for authenticated users without the required permission, and `404 Not Found` for an unknown or deleted vehicle or location. Return `409 Conflict` for duplicate VIN or a license-plate conflict within the confirmed uniqueness scope.
 
 #### Authorization and audit
 
